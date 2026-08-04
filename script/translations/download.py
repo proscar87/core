@@ -17,6 +17,22 @@ from .util import (
 
 DOWNLOAD_DIR = Path("build/translations-download").absolute()
 
+# Languages that are historically translated nearly completely. A sudden
+# coverage collapse for one of these means the Lokalise export is broken
+# (e.g. translations mass-marked as unverified), not real translation work.
+GUARDED_LANGUAGES = {
+    "de",
+    "es",
+    "fr",
+    "it",
+    "nl",
+    "pl",
+    "pt-BR",
+    "ru",
+    "zh-Hans",
+}
+MINIMUM_COVERAGE_RATIO = 0.6
+
 
 def run_download_docker() -> None:
     """Run the Docker image to download the translations."""
@@ -139,11 +155,40 @@ def delete_old_translations() -> None:
         fil.unlink()
 
 
+def check_translation_coverage() -> None:
+    """Abort when a guarded language lost most of its translations."""
+    key_counts = {
+        lang_file.stem: len(flatten_translations(load_json_from_path(lang_file)))
+        for lang_file in DOWNLOAD_DIR.glob("*.json")
+    }
+    if not key_counts:
+        raise ExitApp("No translations were downloaded")
+
+    baseline = max(key_counts.values())
+    suspicious = {
+        lang: count
+        for lang, count in key_counts.items()
+        if lang in GUARDED_LANGUAGES and count < baseline * MINIMUM_COVERAGE_RATIO
+    }
+    if suspicious:
+        details = ", ".join(
+            f"{lang} ({count}/{baseline} keys)"
+            for lang, count in sorted(suspicious.items())
+        )
+        raise ExitApp(
+            "Suspicious translation coverage drop, aborting to avoid shipping"
+            f" broken translations: {details}. Check the verification status"
+            " of these languages on Lokalise."
+        )
+
+
 def run() -> None:
     """Run the script."""
     DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
     run_download_docker()
+
+    check_translation_coverage()
 
     delete_old_translations()
 

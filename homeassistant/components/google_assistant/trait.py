@@ -1337,13 +1337,33 @@ class TemperatureSettingTrait(_Trait):
         return domain == CLIMATE_DOMAIN
 
     @property
+    def _heat_cool_google_mode(self) -> str:
+        """Return the Google mode to report for HVACMode.HEAT_COOL.
+
+        Google only accepts a setpoint range in heatcool mode, so an entity
+        with a single setpoint is reported as auto instead.
+        """
+        supported = self.state.attributes.get(
+            EntityStateAttribute.SUPPORTED_FEATURES, 0
+        )
+        if supported & ClimateEntityFeature.TARGET_TEMPERATURE_RANGE:
+            return "heatcool"
+        return "auto"
+
+    def _google_hvac_mode(self, hvac_mode: climate.HVACMode) -> str | None:
+        """Return the Google mode for an HVAC mode."""
+        if hvac_mode == climate.HVACMode.HEAT_COOL:
+            return self._heat_cool_google_mode
+        return self.hvac_to_google.get(hvac_mode)
+
+    @property
     def climate_google_modes(self):
         """Return supported Google modes."""
         modes = []
         attrs = self.state.attributes
 
         for mode in attrs.get(ClimateEntityCapabilityAttribute.HVAC_MODES) or []:
-            google_mode = self.hvac_to_google.get(mode)
+            google_mode = self._google_hvac_mode(mode)
             if google_mode and google_mode not in modes:
                 modes.append(google_mode)
 
@@ -1404,8 +1424,10 @@ class TemperatureSettingTrait(_Trait):
         if len(modes) == 0 and has_setpoint:
             modes.append("heat")
 
-        if "off" in modes and any(
-            mode in modes for mode in ("heatcool", "heat", "cool")
+        hvac_modes = attrs.get(ClimateEntityCapabilityAttribute.HVAC_MODES) or []
+        if "off" in modes and (
+            climate.HVACMode.HEAT_COOL in hvac_modes
+            or any(mode in modes for mode in ("heat", "cool"))
         ):
             modes.append("on")
         response["availableThermostatModes"] = modes
@@ -1426,7 +1448,7 @@ class TemperatureSettingTrait(_Trait):
         if preset in self.preset_to_google:
             response["thermostatMode"] = self.preset_to_google[preset]
         else:
-            response["thermostatMode"] = self.hvac_to_google.get(operation, "none")
+            response["thermostatMode"] = self._google_hvac_mode(operation) or "none"
 
         if (
             action := self.action_to_google.get(
@@ -1475,8 +1497,7 @@ class TemperatureSettingTrait(_Trait):
                     ),
                     1,
                 )
-                response["thermostatTemperatureSetpointHigh"] = target_temp
-                response["thermostatTemperatureSetpointLow"] = target_temp
+                response["thermostatTemperatureSetpoint"] = target_temp
         elif (
             target_temp := attrs.get(ClimateEntityStateAttribute.TARGET_TEMPERATURE)
         ) is not None:
@@ -1611,12 +1632,23 @@ class TemperatureSettingTrait(_Trait):
                 )
                 return
 
+            hvac_mode = self.google_to_hvac[target_mode]
+            hvac_modes = (
+                self.state.attributes.get(ClimateEntityCapabilityAttribute.HVAC_MODES)
+                or []
+            )
+            if (
+                target_mode == self._heat_cool_google_mode
+                and hvac_mode not in hvac_modes
+            ):
+                hvac_mode = climate.HVACMode.HEAT_COOL
+
             await self.hass.services.async_call(
                 CLIMATE_DOMAIN,
                 climate.SERVICE_SET_HVAC_MODE,
                 {
                     ATTR_ENTITY_ID: self.state.entity_id,
-                    climate.ATTR_HVAC_MODE: self.google_to_hvac[target_mode],
+                    climate.ATTR_HVAC_MODE: hvac_mode,
                 },
                 blocking=not self.config.should_report_state,
                 context=data.context,

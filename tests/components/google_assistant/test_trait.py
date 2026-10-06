@@ -1686,21 +1686,52 @@ async def test_temperature_setting_climate_setpoint(hass: HomeAssistant) -> None
     assert calls[0].data == {ATTR_ENTITY_ID: "climate.bla", ATTR_TEMPERATURE: 18.5}
 
 
-async def test_temperature_setting_climate_setpoint_auto(hass: HomeAssistant) -> None:
+@pytest.mark.parametrize(
+    ("hvac_modes", "state", "available_modes", "auto_hvac_mode"),
+    [
+        pytest.param(
+            [climate.HVACMode.OFF, climate.HVACMode.HEAT_COOL],
+            climate.HVACMode.HEAT_COOL,
+            ["off", "auto", "on"],
+            climate.HVACMode.HEAT_COOL,
+            id="heat_cool",
+        ),
+        pytest.param(
+            [climate.HVACMode.OFF, climate.HVACMode.AUTO],
+            climate.HVACMode.AUTO,
+            ["off", "auto"],
+            climate.HVACMode.AUTO,
+            id="auto",
+        ),
+        pytest.param(
+            [climate.HVACMode.OFF, climate.HVACMode.HEAT_COOL, climate.HVACMode.AUTO],
+            climate.HVACMode.HEAT_COOL,
+            ["off", "auto", "on"],
+            climate.HVACMode.AUTO,
+            id="heat_cool_and_auto",
+        ),
+    ],
+)
+async def test_temperature_setting_climate_setpoint_auto(
+    hass: HomeAssistant,
+    hvac_modes: list[climate.HVACMode],
+    state: climate.HVACMode,
+    available_modes: list[str],
+    auto_hvac_mode: climate.HVACMode,
+) -> None:
     """Test TemperatureSetting trait support for climate domain.
 
-    Setpoint in auto mode.
+    Single setpoint in heat_cool or auto mode. Google only accepts a range in
+    heatcool mode, so these entities must be reported as auto with a setpoint.
     """
     trt = trait.TemperatureSettingTrait(
         hass,
         State(
             "climate.bla",
-            climate.HVACMode.HEAT_COOL,
+            state,
             {
-                climate.ATTR_HVAC_MODES: [
-                    climate.HVACMode.OFF,
-                    climate.HVACMode.HEAT_COOL,
-                ],
+                ATTR_SUPPORTED_FEATURES: ClimateEntityFeature.TARGET_TEMPERATURE,
+                climate.ATTR_HVAC_MODES: hvac_modes,
                 climate.ATTR_MIN_TEMP: 10,
                 climate.ATTR_MAX_TEMP: 30,
                 ATTR_TEMPERATURE: 18,
@@ -1710,7 +1741,7 @@ async def test_temperature_setting_climate_setpoint_auto(hass: HomeAssistant) ->
         BASIC_CONFIG,
     )
     assert trt.sync_attributes() == {
-        "availableThermostatModes": ["off", "heatcool", "on"],
+        "availableThermostatModes": available_modes,
         "thermostatTemperatureRange": {
             "minThresholdCelsius": 10,
             "maxThresholdCelsius": 30,
@@ -1718,16 +1749,14 @@ async def test_temperature_setting_climate_setpoint_auto(hass: HomeAssistant) ->
         "thermostatTemperatureUnit": "C",
     }
     assert trt.query_attributes() == {
-        "thermostatMode": "heatcool",
+        "thermostatMode": "auto",
         "thermostatTemperatureAmbient": 20,
-        "thermostatTemperatureSetpointHigh": 18,
-        "thermostatTemperatureSetpointLow": 18,
+        "thermostatTemperatureSetpoint": 18,
     }
     assert trt.can_execute(trait.COMMAND_THERMOSTAT_TEMPERATURE_SETPOINT, {})
     assert trt.can_execute(trait.COMMAND_THERMOSTAT_SET_MODE, {})
 
     calls = async_mock_service(hass, climate.DOMAIN, climate.SERVICE_SET_TEMPERATURE)
-
     await trt.execute(
         trait.COMMAND_THERMOSTAT_TEMPERATURE_SETPOINT,
         BASIC_DATA,
@@ -1736,6 +1765,80 @@ async def test_temperature_setting_climate_setpoint_auto(hass: HomeAssistant) ->
     )
     assert len(calls) == 1
     assert calls[0].data == {ATTR_ENTITY_ID: "climate.bla", ATTR_TEMPERATURE: 19}
+
+    # A range may still arrive from a SYNC that advertised heatcool.
+    await trt.execute(
+        trait.COMMAND_THERMOSTAT_TEMPERATURE_SET_RANGE,
+        BASIC_DATA,
+        {
+            "thermostatTemperatureSetpointHigh": 22,
+            "thermostatTemperatureSetpointLow": 20,
+        },
+        {},
+    )
+    assert len(calls) == 2
+    assert calls[1].data == {ATTR_ENTITY_ID: "climate.bla", ATTR_TEMPERATURE: 21}
+
+    calls = async_mock_service(hass, climate.DOMAIN, climate.SERVICE_SET_HVAC_MODE)
+    await trt.execute(
+        trait.COMMAND_THERMOSTAT_SET_MODE, BASIC_DATA, {"thermostatMode": "auto"}, {}
+    )
+    assert len(calls) == 1
+    assert calls[0].data == {
+        ATTR_ENTITY_ID: "climate.bla",
+        climate.ATTR_HVAC_MODE: auto_hvac_mode,
+    }
+
+
+async def test_temperature_setting_climate_range_heat_cool(
+    hass: HomeAssistant,
+) -> None:
+    """Test a range capable climate entity in heat_cool is reported as heatcool."""
+    trt = trait.TemperatureSettingTrait(
+        hass,
+        State(
+            "climate.bla",
+            climate.HVACMode.HEAT_COOL,
+            {
+                ATTR_SUPPORTED_FEATURES: ClimateEntityFeature.TARGET_TEMPERATURE
+                | ClimateEntityFeature.TARGET_TEMPERATURE_RANGE,
+                climate.ATTR_HVAC_MODES: [
+                    climate.HVACMode.OFF,
+                    climate.HVACMode.HEAT_COOL,
+                ],
+                climate.ATTR_MIN_TEMP: 10,
+                climate.ATTR_MAX_TEMP: 30,
+                climate.ATTR_TARGET_TEMP_HIGH: 24,
+                climate.ATTR_TARGET_TEMP_LOW: 20,
+                climate.ATTR_CURRENT_TEMPERATURE: 22,
+            },
+        ),
+        BASIC_CONFIG,
+    )
+    assert trt.sync_attributes()["availableThermostatModes"] == [
+        "off",
+        "heatcool",
+        "on",
+    ]
+    assert trt.query_attributes() == {
+        "thermostatMode": "heatcool",
+        "thermostatTemperatureAmbient": 22,
+        "thermostatTemperatureSetpointHigh": 24,
+        "thermostatTemperatureSetpointLow": 20,
+    }
+
+    calls = async_mock_service(hass, climate.DOMAIN, climate.SERVICE_SET_HVAC_MODE)
+    await trt.execute(
+        trait.COMMAND_THERMOSTAT_SET_MODE,
+        BASIC_DATA,
+        {"thermostatMode": "heatcool"},
+        {},
+    )
+    assert len(calls) == 1
+    assert calls[0].data == {
+        ATTR_ENTITY_ID: "climate.bla",
+        climate.ATTR_HVAC_MODE: climate.HVACMode.HEAT_COOL,
+    }
 
 
 async def test_temperature_setting_action_change(hass: HomeAssistant) -> None:

@@ -2,13 +2,22 @@
 
 import asyncio
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import ANY, patch
 
 import pytest
 from pytest_unordered import unordered
 
 from homeassistant.components.camera import CameraEntityFeature
-from homeassistant.components.climate import ATTR_MAX_TEMP, ATTR_MIN_TEMP, HVACMode
+from homeassistant.components.climate import (
+    ATTR_HVAC_MODES,
+    ATTR_MAX_TEMP,
+    ATTR_MIN_TEMP,
+    DOMAIN as CLIMATE_DOMAIN,
+    SERVICE_SET_TEMPERATURE,
+    ClimateEntityFeature,
+    HVACMode,
+)
 
 # pylint: disable-next=home-assistant-component-root-import
 from homeassistant.components.demo.binary_sensor import DemoBinarySensor
@@ -33,6 +42,8 @@ from homeassistant.components.google_assistant import (
     trait,
 )
 from homeassistant.const import (
+    ATTR_SUPPORTED_FEATURES,
+    ATTR_TEMPERATURE,
     ATTR_UNIT_OF_MEASUREMENT,
     EVENT_CALL_SERVICE,
     Platform,
@@ -52,7 +63,12 @@ from homeassistant.setup import async_setup_component
 
 from . import BASIC_CONFIG, MockConfig
 
-from tests.common import MockConfigEntry, MockEntityPlatform, async_capture_events
+from tests.common import (
+    MockConfigEntry,
+    MockEntityPlatform,
+    async_capture_events,
+    async_mock_service,
+)
 
 REQ_ID = "ff36a3cc-ec34-11e6-b1a0-64510650abcf"
 
@@ -899,6 +915,90 @@ async def test_raising_error_trait(hass: HomeAssistant) -> None:
         ],
         "source": "cloud",
     }
+
+
+@pytest.mark.parametrize(
+    "execution",
+    [
+        pytest.param(
+            {"command": "action.devices.commands.ThermostatTemperatureSetRange"},
+            id="no_params",
+        ),
+        pytest.param(
+            {
+                "command": "action.devices.commands.ThermostatTemperatureSetRange",
+                "params": {"thermostatTemperatureSetpointHigh": 20},
+            },
+            id="high_only",
+        ),
+        pytest.param(
+            {
+                "command": "action.devices.commands.ThermostatTemperatureSetRange",
+                "params": {"thermostatTemperatureSetpointLow": 20},
+            },
+            id="low_only",
+        ),
+    ],
+)
+async def test_execute_set_range_without_params(
+    hass: HomeAssistant, execution: dict[str, Any]
+) -> None:
+    """Test a ThermostatTemperatureSetRange command without a complete range.
+
+    Google sent the no_params request to a single setpoint heat_cool entity
+    reported as heatcool.
+    """
+    hass.states.async_set(
+        "climate.bla",
+        HVACMode.HEAT_COOL,
+        {
+            ATTR_SUPPORTED_FEATURES: ClimateEntityFeature.TARGET_TEMPERATURE,
+            ATTR_HVAC_MODES: [HVACMode.HEAT_COOL, HVACMode.OFF],
+            ATTR_MIN_TEMP: 13,
+            ATTR_MAX_TEMP: 44,
+            ATTR_TEMPERATURE: 25,
+        },
+    )
+    calls = async_mock_service(hass, CLIMATE_DOMAIN, SERVICE_SET_TEMPERATURE)
+
+    result = await sh.async_handle_message(
+        hass,
+        BASIC_CONFIG,
+        "test-agent",
+        "test-agent",
+        {
+            "requestId": REQ_ID,
+            "inputs": [
+                {
+                    "context": {"locale_country": "CA", "locale_language": "en"},
+                    "intent": "action.devices.EXECUTE",
+                    "payload": {
+                        "commands": [
+                            {
+                                "devices": [{"id": "climate.bla"}],
+                                "execution": [execution],
+                            }
+                        ]
+                    },
+                }
+            ],
+        },
+        const.SOURCE_CLOUD,
+    )
+
+    assert result == {
+        "requestId": REQ_ID,
+        "payload": {
+            "commands": [
+                {
+                    "ids": ["climate.bla"],
+                    "status": "ERROR",
+                    "errorCode": "valueOutOfRange",
+                }
+            ]
+        },
+    }
+    assert len(calls) == 0
 
 
 async def test_serialize_input_boolean(hass: HomeAssistant) -> None:

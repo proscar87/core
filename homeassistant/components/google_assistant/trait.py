@@ -1540,6 +1540,14 @@ class TemperatureSettingTrait(_Trait):
             )
 
         elif command == COMMAND_THERMOSTAT_TEMPERATURE_SET_RANGE:
+            if (
+                "thermostatTemperatureSetpointHigh" not in params
+                or "thermostatTemperatureSetpointLow" not in params
+            ):
+                raise SmartHomeError(
+                    ERR_VALUE_OUT_OF_RANGE, "Temperature range is missing"
+                )
+
             temp_high = TemperatureConverter.convert(
                 params["thermostatTemperatureSetpointHigh"],
                 UnitOfTemperature.CELSIUS,
